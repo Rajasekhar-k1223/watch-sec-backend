@@ -1,0 +1,6 @@
+@watch_sec_backend_HostAddress = http://192.168.1.4:5140
+
+GET {{watch_sec_backend_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
