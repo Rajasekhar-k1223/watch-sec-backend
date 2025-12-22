@@ -8,7 +8,24 @@ var builder = WebApplication.CreateBuilder(args);
 
 // 1. MySQL (Railway)
 // 1. MySQL (Railway)
-var mysqlConn = "Server=trolley.proxy.rlwy.net;Port=34465;Database=railway;Uid=root;Pwd=nBhlxqOuzWwFQkraCcNrVIoDVFqFbWEA;Connect Timeout=60;Pooling=true;Keepalive=60;";
+// 1. Database Configuration
+var useLocal = builder.Configuration.GetValue<bool>("DatabaseConfig:UseLocalDB");
+var syncToLocal = builder.Configuration.GetValue<bool>("DatabaseConfig:SyncToLocalOnStartup");
+
+Console.WriteLine($"[Init] Database Mode: {(useLocal ? "LOCAL" : "REMOTE")}");
+
+var mysqlConn = useLocal 
+    ? builder.Configuration.GetConnectionString("LocalMySQL") 
+    : builder.Configuration.GetConnectionString("RemoteMySQL");
+
+var mongoConn = useLocal 
+    ? builder.Configuration.GetConnectionString("LocalMongo") 
+    : builder.Configuration.GetConnectionString("RemoteMongo");
+
+if (string.IsNullOrEmpty(mysqlConn) || string.IsNullOrEmpty(mongoConn))
+    throw new Exception("CRITICAL: Missing ConnectionStrings in appsettings.json");
+
+// 1. MySQL Configuration
 builder.Services.AddDbContext<AppDbContext>(options =>
 {
     try 
@@ -27,8 +44,7 @@ builder.Services.AddDbContext<AppDbContext>(options =>
     }
 });
 
-// 2. MongoDB (For high-volume Event Logs)
-var mongoConn = "mongodb://mongo:taOtHmJnOLgnMorrtJpDZLmozClPXmOq@crossover.proxy.rlwy.net:30926";
+// 2. MongoDB
 builder.Services.AddSingleton<IMongoClient>(sp => new MongoClient(mongoConn));
 
 builder.Services.AddOpenApi();
@@ -77,60 +93,63 @@ var app = builder.Build();
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-    db.Database.EnsureCreated();
+    
+    // Ensure Active DB Created
+    try { db.Database.EnsureCreated(); } catch (Exception ex) { Console.WriteLine($"[Warn] DB Init: {ex.Message}"); }
 
-    // AUTO-MIGRATION: Fix missing columns in existing tables
-    try 
+    // --- SYNC LOGIC (REMOTE -> LOCAL) ---
+    if (syncToLocal && !useLocal)
     {
-        db.Database.ExecuteSqlRaw("ALTER TABLE AgentReports ADD COLUMN TenantId INT NOT NULL DEFAULT 1;");
-    } 
-    catch { /* Ignore */ }
+        Console.WriteLine("[Sync] Starting Data Synchronization from REMOTE to LOCAL...");
+        try 
+        {
+            // 1. Fetch Remote Data (we are currently connected to Remote)
+            var remoteTenants = db.Tenants.ToList();
+            var remoteUsers = db.Users.ToList();
+            Console.WriteLine($"[Sync] Fetched {remoteTenants.Count} Tenants, {remoteUsers.Count} Users from Remote.");
 
-    // AUTO-MIGRATION: FORCE RECREATE TABLES (As requested)
-    try 
-    {
-        // 1. Drop existing tables (Users first due to dependency)
-        db.Database.ExecuteSqlRaw("DROP TABLE IF EXISTS Users;");
-        db.Database.ExecuteSqlRaw("DROP TABLE IF EXISTS Tenants;");
-
-        // 2. Create Tenants Table
-        db.Database.ExecuteSqlRaw(@"
-            CREATE TABLE Tenants (
-                Id INT AUTO_INCREMENT PRIMARY KEY,
-                Name LONGTEXT NOT NULL,
-                ApiKey LONGTEXT NOT NULL,
-                Plan LONGTEXT NOT NULL
-            );
-        ");
-
-        // 3. Seed Tenants
-        db.Database.ExecuteSqlRaw("INSERT INTO Tenants (Id, Name, ApiKey, Plan) VALUES (1, 'CyberCorp Inc', 'default-tenant-key', 'Enterprise')");
-        db.Database.ExecuteSqlRaw("INSERT INTO Tenants (Id, Name, ApiKey, Plan) VALUES (2, 'RetailChain Ltd', 'retail-tenant-key', 'Starter')");
-
-        // 4. Create Users Table (Linked to Tenants)
-        db.Database.ExecuteSqlRaw(@"
-            CREATE TABLE Users (
-                Id INT AUTO_INCREMENT PRIMARY KEY,
-                Username LONGTEXT NOT NULL,
-                PasswordHash LONGTEXT NOT NULL,
-                Role LONGTEXT NOT NULL,
-                TenantId INT NULL
-            );
-        ");
-
-        // 5. Seed Users
-        db.Database.ExecuteSqlRaw("INSERT INTO Users (Id, Username, PasswordHash, Role, TenantId) VALUES (1, 'admin', 'admin123', 'SuperAdmin', NULL)");
-        db.Database.ExecuteSqlRaw("INSERT INTO Users (Id, Username, PasswordHash, Role, TenantId) VALUES (2, 'tenant_admin', 'tenant123', 'TenantAdmin', 1)");
-        db.Database.ExecuteSqlRaw("INSERT INTO Users (Id, Username, PasswordHash, Role, TenantId) VALUES (3, 'analyst_1', 'analyst123', 'Analyst', 1)");
-        db.Database.ExecuteSqlRaw("INSERT INTO Users (Id, Username, PasswordHash, Role, TenantId) VALUES (4, 'retail_admin', 'retail123', 'TenantAdmin', 2)");
-        db.Database.ExecuteSqlRaw("INSERT INTO Users (Id, Username, PasswordHash, Role, TenantId) VALUES (5, 'analyst_2', 'analyst123', 'Analyst', 2)");
-        
-        Console.WriteLine("SUCCESS: Database Tables Recreated and Seeded.");
+            // 2. Connect to Local DB manually
+            var localStr = builder.Configuration.GetConnectionString("LocalMySQL");
+            if (!string.IsNullOrEmpty(localStr))
+            {
+                var localOpts = new DbContextOptionsBuilder<AppDbContext>()
+                    .UseMySql(localStr, new MySqlServerVersion(new Version(8, 0, 21)))
+                    .Options;
+                
+                using var localDb = new AppDbContext(localOpts);
+                localDb.Database.EnsureCreated();
+                
+                // 3. Upsert Tenants
+                foreach (var t in remoteTenants)
+                {
+                    if (!localDb.Tenants.Any(x => x.Id == t.Id))
+                    {
+                        localDb.Tenants.Add(t);
+                    }
+                }
+                
+                // 4. Upsert Users
+                foreach (var u in remoteUsers)
+                {
+                    if (!localDb.Users.Any(x => x.Id == u.Id))
+                    {
+                        localDb.Users.Add(u);
+                    }
+                }
+                
+                localDb.SaveChanges();
+                Console.WriteLine("[Sync] SUCCESS: Synchronized data to Local Database.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Sync] FAILED: {ex.Message}");
+        }
     }
-    catch (Exception ex)
-    {
-        Console.WriteLine("CRITICAL DB INIT ERROR: " + ex.Message);
-    }
+    // --- END SYNC LOGIC ---
+
+    // AUTO-MIGRATION: Fix missing columns
+    try { db.Database.ExecuteSqlRaw("ALTER TABLE AgentReports ADD COLUMN TenantId INT NOT NULL DEFAULT 1;"); } catch {}
 }
 
 // Enable Swagger UI (Always, for public testing)
