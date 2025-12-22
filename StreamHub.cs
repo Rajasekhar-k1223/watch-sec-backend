@@ -28,22 +28,31 @@ public class StreamHub : Hub
         var agentId = httpContext?.Request.Query["agentId"].ToString();
         var tenantKey = httpContext?.Request.Headers["X-Tenant-Key"].ToString();
 
-        // Security Check: Validate Tenant Key
-        var tenant = await Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.FirstOrDefaultAsync(_db.Tenants, t => t.ApiKey == tenantKey);
-        if (tenant == null)
+        // 1. Allow Authenticated Users (Frontend Dashboard)
+        if (Context.User?.Identity?.IsAuthenticated == true)
         {
-            Console.WriteLine($"[StreamHub] REJECTED Connection from {agentId}: Invalid Tenant Key");
-            Context.Abort();
+            await base.OnConnectedAsync();
             return;
         }
-        
-        if (!string.IsNullOrEmpty(agentId))
+
+        // 2. Allow Agents with Valid Tenant Key
+        if (!string.IsNullOrEmpty(tenantKey))
         {
-            // Register this connection ID to the Agent's Group
-            await Groups.AddToGroupAsync(Context.ConnectionId, agentId);
+            var tenant = await Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.FirstOrDefaultAsync(_db.Tenants, t => t.ApiKey == tenantKey);
+            if (tenant != null)
+            {
+                if (!string.IsNullOrEmpty(agentId))
+                {
+                    await Groups.AddToGroupAsync(Context.ConnectionId, agentId);
+                }
+                await base.OnConnectedAsync();
+                return;
+            }
         }
-        
-        await base.OnConnectedAsync();
+
+        // 3. Reject Unknowns
+        Console.WriteLine($"[StreamHub] REJECTED Connection from {agentId ?? "Unknown"}: Missing or Invalid Creds");
+        Context.Abort();
     }
 
     public async Task SendScreen(string agentId, string base64Image)

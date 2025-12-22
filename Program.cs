@@ -8,7 +8,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 // 1. MySQL (Railway)
 // 1. MySQL (Railway)
-var mysqlConn = "Server=trolley.proxy.rlwy.net;Port=34465;Database=railway;Uid=root;Pwd=nBhlxqOuzWwFQkraCcNrVIoDVFqFbWEA;Connect Timeout=60;";
+var mysqlConn = "Server=trolley.proxy.rlwy.net;Port=34465;Database=railway;Uid=root;Pwd=nBhlxqOuzWwFQkraCcNrVIoDVFqFbWEA;Connect Timeout=60;Pooling=true;Keepalive=60;";
 builder.Services.AddDbContext<AppDbContext>(options =>
 {
     try 
@@ -185,21 +185,7 @@ app.MapPost("/api/report", async ([FromBody] AgentReportDto dto, AppDbContext db
     return Results.Ok(new { TenantId = tenant.Id });
 });
 
-// API: List Tenants (Super Admin)
-app.MapGet("/api/tenants", async (AppDbContext db) =>
-{
-    // In real app: Add [Authorize(Roles="SuperAdmin")]
-    return await db.Tenants.ToListAsync();
-});
 
-// API: Create Tenant (Super Admin)
-app.MapPost("/api/tenants", async ([FromBody] Tenant tenant, AppDbContext db) =>
-{
-    tenant.ApiKey = Guid.NewGuid().ToString(); // Generate Key
-    db.Tenants.Add(tenant);
-    await db.SaveChangesAsync();
-    return Results.Created($"/api/tenants/{tenant.Id}", tenant);
-});
 
 // API: Get Status (Dashboard) - Supports Filtering
 app.MapGet("/api/status", async (int? tenantId, AppDbContext db) =>
