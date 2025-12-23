@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using MongoDB.Driver;
 using watch_sec_backend;
+using watch_sec_backend.Services;
 using Microsoft.AspNetCore.SignalR; // Required for SendAsync extension
 
 var builder = WebApplication.CreateBuilder(args);
@@ -66,7 +67,10 @@ builder.Services.AddAuthentication("Bearer")
 builder.Services.AddAuthorization();
 builder.Services.AddControllers();
 builder.Services.AddHostedService<MailListenerService>();
+builder.Services.AddScoped<AuditService>();
+builder.Services.AddScoped<IEmailService, SmtpEmailService>();
 builder.Services.AddHostedService<IcapService>();
+builder.Services.AddScoped<DataSeeder>();
 builder.Services.AddSignalR(options =>
 {
     options.MaximumReceiveMessageSize = 10 * 1024 * 1024;
@@ -148,8 +152,88 @@ using (var scope = app.Services.CreateScope())
     }
     // --- END SYNC LOGIC ---
 
-    // AUTO-MIGRATION: Fix missing columns
-    try { db.Database.ExecuteSqlRaw("ALTER TABLE AgentReports ADD COLUMN TenantId INT NOT NULL DEFAULT 1;"); } catch {}
+    // AUTO-MIGRATION: Fix missing columns safely
+    try { 
+        // 1. Ensure AgentReports has TenantId
+        try { 
+            db.Database.ExecuteSqlRaw("ALTER TABLE AgentReports ADD COLUMN TenantId INT NOT NULL DEFAULT 1;"); 
+        } catch { /* Column likely exists */ }
+        
+        // 2. Tenants - New Billing Columns
+        try {
+            db.Database.ExecuteSqlRaw("ALTER TABLE Tenants ADD COLUMN AgentLimit INT NOT NULL DEFAULT 5;");
+            db.Database.ExecuteSqlRaw("ALTER TABLE Tenants ADD COLUMN NextBillingDate DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP;");
+        } catch { /* Column likely exists */ }
+
+        // 3. Ensure Agents Table exists (PRIORITY: Create before Alter)
+        try {
+            db.Database.ExecuteSqlRaw(@"
+                CREATE TABLE IF NOT EXISTS Agents (
+                    Id INT AUTO_INCREMENT PRIMARY KEY,
+                    AgentId VARCHAR(255) NOT NULL,
+                    TenantId INT NOT NULL,
+                    ScreenshotsEnabled TINYINT(1) NOT NULL DEFAULT 1,
+                    LastSeen DATETIME NOT NULL,
+                    Latitude DOUBLE NOT NULL DEFAULT 0,
+                    Longitude DOUBLE NOT NULL DEFAULT 0,
+                    Country TEXT,
+                    InstalledSoftwareJson TEXT,
+                    LocalIp VARCHAR(50),
+                    Gateway VARCHAR(50),
+                    INDEX (AgentId)
+                );
+            ");
+        } catch (Exception ex) { Console.WriteLine($"[Migrate] Agents Table Create Failed: {ex.Message}"); }
+
+        // 4. Agents - New Columns (If table existed but old schema)
+        try {
+            db.Database.ExecuteSqlRaw("ALTER TABLE Agents ADD COLUMN Latitude DOUBLE NOT NULL DEFAULT 0;");
+            db.Database.ExecuteSqlRaw("ALTER TABLE Agents ADD COLUMN Longitude DOUBLE NOT NULL DEFAULT 0;");
+            db.Database.ExecuteSqlRaw("ALTER TABLE Agents ADD COLUMN Country TEXT;");
+        } catch { /* Column likely exists */ }
+
+        try {
+            db.Database.ExecuteSqlRaw("ALTER TABLE Agents ADD COLUMN InstalledSoftwareJson TEXT;");
+            db.Database.ExecuteSqlRaw("ALTER TABLE Agents ADD COLUMN LocalIp VARCHAR(50) DEFAULT '0.0.0.0';");
+            db.Database.ExecuteSqlRaw("ALTER TABLE Agents ADD COLUMN Gateway VARCHAR(50) DEFAULT 'Unknown';");
+        } catch { /* Column likely exists */ }
+
+
+        // 5. Policies - New Blocking Columns
+        try {
+            db.Database.ExecuteSqlRaw("ALTER TABLE Policies ADD COLUMN BlockedAppsJson TEXT;");
+            db.Database.ExecuteSqlRaw("ALTER TABLE Policies ADD COLUMN BlockedWebsitesJson TEXT;");
+        } catch { /* Column likely exists */ }
+
+        // 6. Ensure AuditLogs Table exists
+        try {
+            db.Database.ExecuteSqlRaw(@"
+                CREATE TABLE IF NOT EXISTS AuditLogs (
+                    Id INT AUTO_INCREMENT PRIMARY KEY,
+                    TenantId INT NOT NULL,
+                    Actor VARCHAR(255) NOT NULL,
+                    Action VARCHAR(255) NOT NULL,
+                    Target VARCHAR(255) NOT NULL,
+                    Details TEXT,
+                    Timestamp DATETIME NOT NULL,
+                    INDEX (TenantId),
+                    INDEX (Timestamp)
+                );
+            ");
+        } catch { }
+
+    } catch (Exception ex) { Console.WriteLine($"[Migrate] Fatal Error: {ex.Message}"); }
+
+    // --- AUTO SEEDING (NEW) ---
+    try 
+    {
+        var seeder = scope.ServiceProvider.GetRequiredService<DataSeeder>();
+        await seeder.SeedAsync();
+    } 
+    catch(Exception ex) 
+    { 
+        Console.WriteLine($"[Seeder] Error: {ex.Message}"); 
+    }
 }
 
 // Enable Swagger UI (Always, for public testing)
@@ -165,7 +249,6 @@ app.UseHttpsRedirection();
 app.UseCors("AllowAll");
 app.MapControllers(); // Map AuthController endpoints
 
-// API: Save Report (PostgreSQL)
 // API: Save Report (PostgreSQL) - Now Multi-Tenant Aware
 app.MapPost("/api/report", async ([FromBody] AgentReportDto dto, AppDbContext db, Microsoft.AspNetCore.SignalR.IHubContext<StreamHub> hub) =>
 {
@@ -179,8 +262,7 @@ app.MapPost("/api/report", async ([FromBody] AgentReportDto dto, AppDbContext db
         return Results.Unauthorized();
     }
 
-    // 2. ALWAYS INSERT (History Mode)
-    // We no longer update existing records. We keep a history of every heartbeat.
+    // 2. INSERT HISTORY (Reports)
     db.AgentReports.Add(new AgentReportEntity 
     { 
         AgentId = dto.AgentId,
@@ -190,18 +272,56 @@ app.MapPost("/api/report", async ([FromBody] AgentReportDto dto, AppDbContext db
         MemoryUsage = dto.MemoryUsage,
         Timestamp = dto.Timestamp
     });
-    
-    Console.WriteLine($"[API] Inserted History Record for {dto.AgentId}");
+
+    // 2b. SYNC AGENT Config (Persistent Entity)
+    var agent = await db.Agents.FirstOrDefaultAsync(a => a.AgentId == dto.AgentId);
+    if (agent == null)
+    {
+        // New Agent - Mock Geo
+        var lat = (new Random().NextDouble() * 160) - 80; // Avoid poles
+        var lon = (new Random().NextDouble() * 360) - 180;
+
+        agent = new Agent 
+        { 
+            AgentId = dto.AgentId, 
+            TenantId = tenant.Id, 
+            ScreenshotsEnabled = true, // Default ON
+            LastSeen = DateTime.UtcNow,
+            Latitude = lat,
+            Longitude = lon,
+            Country = "Unknown", // TODO: Real lookup
+            InstalledSoftwareJson = dto.InstalledSoftwareJson ?? "[]",
+            LocalIp = dto.LocalIp ?? "0.0.0.0",
+            Gateway = dto.Gateway ?? "Unknown"
+        };
+        db.Agents.Add(agent);
+    }
+    else
+    {
+        // Update Last Seen
+        agent.LastSeen = DateTime.UtcNow;
+        // Ensure TenantId matches (if moved?)
+        agent.TenantId = tenant.Id;
+        
+        // Update Software List if provided
+        if (!string.IsNullOrEmpty(dto.InstalledSoftwareJson))
+        {
+            agent.InstalledSoftwareJson = dto.InstalledSoftwareJson;
+        }
+
+        // Update Network Info if provided
+        if (!string.IsNullOrEmpty(dto.LocalIp)) agent.LocalIp = dto.LocalIp;
+        if (!string.IsNullOrEmpty(dto.Gateway)) agent.Gateway = dto.Gateway;
+    }
     
     await db.SaveChangesAsync();
 
-    // 3. BROADCAST TO FRONTEND (Real-Time Update)
-    // This allows the "View Logs" table to update instantly without reload.
-    // We reuse the standard "ReceiveEvent" message so the frontend doesn't need new logic.
+    // 3. BROADCAST
     var details = $"Status: {dto.Status} | CPU: {dto.CpuUsage:F1}% | MEM: {dto.MemoryUsage:F1}MB";
     await hub.Clients.All.SendAsync("ReceiveEvent", dto.AgentId, "System Heartbeat", details, dto.Timestamp);
 
-    return Results.Ok(new { TenantId = tenant.Id });
+    // Return Config to Agent
+    return Results.Ok(new { TenantId = tenant.Id, ScreenshotsEnabled = agent.ScreenshotsEnabled });
 });
 
 
@@ -248,4 +368,4 @@ app.MapHub<StreamHub>("/streamHub");
 
 app.Run();
 
-public record AgentReportDto(string AgentId, string Status, double CpuUsage, double MemoryUsage, DateTime Timestamp, string TenantApiKey);
+public record AgentReportDto(string AgentId, string Status, double CpuUsage, double MemoryUsage, DateTime Timestamp, string TenantApiKey, string? InstalledSoftwareJson = null, string? LocalIp = null, string? Gateway = null);

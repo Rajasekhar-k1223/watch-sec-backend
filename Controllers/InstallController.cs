@@ -10,13 +10,16 @@ public class InstallController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly IConfiguration _config;
+    private readonly Services.IEmailService _email;
+    
     // Simple in-memory cache for OTPs (In production, use Redis or DB)
     private static readonly Dictionary<string, (string Code, DateTime Expiry)> _otpCache = new();
 
-    public InstallController(AppDbContext db, IConfiguration config)
+    public InstallController(AppDbContext db, IConfiguration config, Services.IEmailService email)
     {
         _db = db;
         _config = config;
+        _email = email;
     }
 
     public class ValidateRequest
@@ -24,10 +27,11 @@ public class InstallController : ControllerBase
         public string MachineName { get; set; } = "";
         public string Domain { get; set; } = "";
         public string IP { get; set; } = "";
+        public string? TenantApiKey { get; set; } // Added for Notification Context
     }
 
     [HttpPost("validate")]
-    public IActionResult ValidateDevice([FromBody] ValidateRequest req)
+    public async Task<IActionResult> ValidateDevice([FromBody] ValidateRequest req)
     {
         var trustedDomains = _config.GetSection("SecuritySettings:TrustedDomains").Get<string[]>() ?? Array.Empty<string>();
         var trustedIPs = _config.GetSection("SecuritySettings:TrustedIPs").Get<string[]>() ?? Array.Empty<string>();
@@ -40,6 +44,39 @@ public class InstallController : ControllerBase
         if (isDomainTrusted || isIpTrusted)
         {
             return Ok(new { Status = "Trusted", Message = "Device Authorized via Policy." });
+        }
+
+        // --- UNTRUSTED DEVICE LOGIC ---
+
+        // 1. Notify Tenant Admin (if Key provided)
+        if (!string.IsNullOrEmpty(req.TenantApiKey))
+        {
+            var tenant = await _db.Tenants.FirstOrDefaultAsync(t => t.ApiKey == req.TenantApiKey);
+            if (tenant != null)
+            {
+                var admin = await _db.Users.FirstOrDefaultAsync(u => u.TenantId == tenant.Id && u.Role == "TenantAdmin");
+                if (admin != null)
+                {
+                    // Construct Email
+                     var emailTarget = admin.Username.Contains("@") ? admin.Username : $"{admin.Username}@example.com";
+                     
+                     // Fire and forget email (don't block response)
+                     _ = _email.SendEmailAsync(
+                         emailTarget,
+                         "Installation Blocked: Authorization Required",
+                         $@"
+                            <h2>New Device Installation Attempt</h2>
+                            <p>A device outside your trusted network attempted to install the agent.</p>
+                            <ul>
+                                <li><b>Machine:</b> {req.MachineName}</li>
+                                <li><b>Domain:</b> {req.Domain}</li>
+                                <li><b>IP Address:</b> {req.IP}</li>
+                                <li><b>Timestamp:</b> {DateTime.UtcNow}</li>
+                            </ul>
+                            <p><b>Action Required:</b> If this is legitimate, please generate an OTP from your Dashboard and provide it to the user.</p>
+                         ");
+                }
+            }
         }
 
         return Ok(new { Status = "Untrusted", Message = "Remote Device Detected. Validation PIN Required." });

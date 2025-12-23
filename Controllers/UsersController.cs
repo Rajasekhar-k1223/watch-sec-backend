@@ -59,4 +59,33 @@ public class UsersController : ControllerBase
 
         return Forbid();
     }
+    [HttpPost("change-password")]
+    public async Task<IActionResult> ChangePassword([FromBody] ChangePasswordRequest req, [FromServices] AuditService audit)
+    {
+        var username = User.Identity?.Name;
+        if (string.IsNullOrEmpty(username)) return Unauthorized();
+
+        var user = await _db.Users.FirstOrDefaultAsync(u => u.Username == username);
+        if (user == null) return NotFound();
+
+        // Validate Old Password (Simple string comparison as per seed data)
+        if (user.PasswordHash != req.OldPassword)
+        {
+            return BadRequest("Incorrect current password.");
+        }
+
+        user.PasswordHash = req.NewPassword;
+        await _db.SaveChangesAsync();
+
+        // Log
+        await audit.LogAsync(user.TenantId ?? 0, user.Username, "Change Password", "User Account", "User changed their password.");
+
+        return Ok(new { Message = "Password updated successfully." });
+    }
+}
+
+public class ChangePasswordRequest
+{
+    public string OldPassword { get; set; } = "";
+    public string NewPassword { get; set; } = "";
 }

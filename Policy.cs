@@ -20,4 +20,8 @@ public class Policy
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     
     public int TenantId { get; set; }
+
+    // New Fields for Advanced Policy
+    public string BlockedAppsJson { get; set; } = "[]"; // e.g. ["spotify.exe", "game.exe"]
+    public string BlockedWebsitesJson { get; set; } = "[]"; // e.g. ["facebook.com", "gambling.com"]
 }

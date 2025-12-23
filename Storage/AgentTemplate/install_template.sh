@@ -52,10 +52,12 @@ mkdir -p "$INSTALL_DIR"
 cp -r "$TEMP_DIR/extracted/"* "$INSTALL_DIR/"
 chmod +x "$INSTALL_DIR/watch-sec-agent"
 
-# 5. Register Service (Systemd)
-if [ -d "/etc/systemd/system" ]; then
-    echo "[*] Registering Systemd Service..."
-    cat <<EOF > /etc/systemd/system/watch-sec-agent.service
+# 5. Register Service
+OS="$(uname -s)"
+if [ "$OS" = "Linux" ]; then
+    if [ -d "/etc/systemd/system" ]; then
+        echo "[*] Registering Systemd Service (Linux)..."
+        cat <<EOF > /etc/systemd/system/watch-sec-agent.service
 [Unit]
 Description=WatchSec Enterprise Agent
 After=network.target
@@ -72,12 +74,49 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-    systemctl daemon-reload
-    systemctl enable watch-sec-agent
-    systemctl start watch-sec-agent
-    echo "[+] Service started."
+        systemctl daemon-reload
+        systemctl enable watch-sec-agent
+        systemctl start watch-sec-agent
+        echo "[+] Service started."
+    else
+        echo "[!] Systemd not found. You may need to run the agent manually."
+    fi
+
+elif [ "$OS" = "Darwin" ]; then
+    echo "[*] Registering Launchd Service (macOS)..."
+    PLIST="/Library/LaunchDaemons/com.watchsec.agent.plist"
+    
+    cat <<EOF > "$PLIST"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.watchsec.agent</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$INSTALL_DIR/watch-sec-agent</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/var/log/watch-sec.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/watch-sec.err</string>
+    <key>WorkingDirectory</key>
+    <string>$INSTALL_DIR</string>
+</dict>
+</plist>
+EOF
+    
+    chmod 644 "$PLIST"
+    launchctl unload "$PLIST" 2>/dev/null || true
+    launchctl load -w "$PLIST"
+    echo "[+] Service started via launchd."
 else
-    echo "[!] Systemd not found. You may need to run the agent manually."
+    echo "[!] Unknown OS: $OS. Please run agent manually."
 fi
 
 # 6. Cleanup
