@@ -8,9 +8,12 @@ public class ScreenshotsController : ControllerBase
 {
     private readonly string _storageRoot;
 
-    public ScreenshotsController()
+    public ScreenshotsController(IWebHostEnvironment env, IConfiguration config)
     {
-        _storageRoot = Path.Combine(Directory.GetCurrentDirectory(), "Storage", "Screenshots");
+        var basePath = config["StoragePath"] ?? "Storage";
+        if (!Path.IsPathRooted(basePath)) basePath = Path.Combine(env.ContentRootPath, basePath);
+        
+        _storageRoot = Path.Combine(basePath, "Screenshots");
     }
 
     [HttpGet("list/{agentId}")]

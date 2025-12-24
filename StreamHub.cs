@@ -15,11 +15,15 @@ public class StreamHub : Hub
     
     private readonly IMongoClient _mongo;
     private readonly AppDbContext _db;
+    private readonly IConfiguration _config;
+    private readonly IWebHostEnvironment _env;
 
-    public StreamHub(IMongoClient mongo, AppDbContext db)
+    public StreamHub(IMongoClient mongo, AppDbContext db, IConfiguration config, IWebHostEnvironment env)
     {
         _mongo = mongo;
         _db = db;
+        _config = config;
+        _env = env;
     }
 
     public override async Task OnConnectedAsync()
@@ -75,7 +79,10 @@ public class StreamHub : Hub
             // 1. Storage Path Logic
             // Structure: Storage/Screenshots/{AgentId}/{yyyyMMdd}/{HHmmss.webp}
             var dateFolder = DateTime.UtcNow.ToString("yyyyMMdd");
-            var storagePath = Path.Combine(Directory.GetCurrentDirectory(), "Storage", "Screenshots", agentId, dateFolder);
+            var basePath = _config["StoragePath"] ?? "Storage";
+            if (!Path.IsPathRooted(basePath)) basePath = Path.Combine(_env.ContentRootPath, basePath);
+            
+            var storagePath = Path.Combine(basePath, "Screenshots", agentId, dateFolder);
             
             if (!Directory.Exists(storagePath))
             {

@@ -245,6 +245,12 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
+// Enable Forwarded Headers for Ngrok/IIS
+app.UseForwardedHeaders(new ForwardedHeadersOptions
+{
+    ForwardedHeaders = Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedFor | Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedHost
+});
+
 app.UseHttpsRedirection();
 app.UseCors("AllowAll");
 app.MapControllers(); // Map AuthController endpoints

@@ -10,17 +10,22 @@ namespace watch_sec_backend.Controllers;
 public class TranscriptionController : ControllerBase
 {
     private readonly IWebHostEnvironment _env;
+    private readonly IConfiguration _config;
 
-    public TranscriptionController(IWebHostEnvironment env)
+    public TranscriptionController(IWebHostEnvironment env, IConfiguration config)
     {
         _env = env;
+        _config = config;
     }
 
     [HttpPost("transcribe")]
     public async Task<IActionResult> TranscribeAudio([FromQuery] string agentId, [FromQuery] string filename)
     {
         // 1. Find Audio File
-        var agentDir = Path.Combine(_env.ContentRootPath, "Storage", "Audio", agentId);
+        var basePath = _config["StoragePath"] ?? "Storage";
+        if (!Path.IsPathRooted(basePath)) basePath = Path.Combine(_env.ContentRootPath, basePath);
+        
+        var agentDir = Path.Combine(basePath, "Audio", agentId);
         if (!Directory.Exists(agentDir)) return NotFound("Agent audio storage not found");
 
         string? audioPath = null;

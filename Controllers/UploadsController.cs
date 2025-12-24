@@ -8,11 +8,13 @@ public class UploadsController : ControllerBase
 {
     private readonly IWebHostEnvironment _env;
     private readonly AppDbContext _db;
+    private readonly IConfiguration _config;
 
-    public UploadsController(IWebHostEnvironment env, AppDbContext db)
+    public UploadsController(IWebHostEnvironment env, AppDbContext db, IConfiguration config)
     {
         _env = env;
         _db = db;
+        _config = config;
     }
 
     [HttpPost("audio")]
@@ -27,7 +29,10 @@ public class UploadsController : ControllerBase
         try 
         {
             var dateFolder = DateTime.UtcNow.ToString("yyyyMMdd");
-            var storagePath = Path.Combine(Directory.GetCurrentDirectory(), "Storage", "Audio", dto.AgentId, dateFolder);
+            var basePath = _config["StoragePath"] ?? "Storage";
+            if (!Path.IsPathRooted(basePath)) basePath = Path.Combine(_env.ContentRootPath, basePath);
+            
+            var storagePath = Path.Combine(basePath, "Audio", dto.AgentId, dateFolder);
             Directory.CreateDirectory(storagePath);
 
             var filename = $"{DateTime.UtcNow:HHmmss}_{dto.File.FileName}";
@@ -58,7 +63,10 @@ public class UploadsController : ControllerBase
         try 
         {
             var dateFolder = DateTime.UtcNow.ToString("yyyyMMdd");
-            var storagePath = Path.Combine(Directory.GetCurrentDirectory(), "Storage", "Shadows", dto.AgentId, dateFolder);
+            var basePath = _config["StoragePath"] ?? "Storage";
+            if (!Path.IsPathRooted(basePath)) basePath = Path.Combine(_env.ContentRootPath, basePath);
+            
+            var storagePath = Path.Combine(basePath, "Shadows", dto.AgentId, dateFolder);
             Directory.CreateDirectory(storagePath);
 
             var filename = $"{DateTime.UtcNow:HHmmss}_{dto.File.FileName}";

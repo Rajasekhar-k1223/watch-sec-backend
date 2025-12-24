@@ -14,11 +14,13 @@ public class DownloadsController : ControllerBase
 {
     private readonly IWebHostEnvironment _env;
     private readonly AppDbContext _db;
+    private readonly IConfiguration _config;
 
-    public DownloadsController(IWebHostEnvironment env, AppDbContext db)
+    public DownloadsController(IWebHostEnvironment env, AppDbContext db, IConfiguration config)
     {
         _env = env;
         _db = db;
+        _config = config;
     }
 
     [HttpGet("agent")]
@@ -41,7 +43,10 @@ public class DownloadsController : ControllerBase
             _ => "win-x64"
         };
 
-        var templatePath = Path.Combine(_env.ContentRootPath, "Storage", "AgentTemplate", templateFolder);
+        var basePath = _config["StoragePath"] ?? "Storage";
+        if (!Path.IsPathRooted(basePath)) basePath = Path.Combine(_env.ContentRootPath, basePath);
+
+        var templatePath = Path.Combine(basePath, "AgentTemplate", templateFolder);
         if (!Directory.Exists(templatePath)) return NotFound($"Agent Template for {os} not found on server.");
 
         // 3. Prepare Temp Directory
@@ -91,7 +96,7 @@ public class DownloadsController : ControllerBase
             if (os.ToLower() == "windows")
             {
                 // ... Windows SFX Logic (Existing) ...
-                var stubPath = Path.Combine(_env.ContentRootPath, "Storage", "AgentTemplate", "Stub.exe");
+                var stubPath = Path.Combine(basePath, "AgentTemplate", "Stub.exe");
                 if (!System.IO.File.Exists(stubPath)) return StatusCode(500, "Installer Stub not found.");
 
                 var stubBytes = await System.IO.File.ReadAllBytesAsync(stubPath);
@@ -109,7 +114,7 @@ public class DownloadsController : ControllerBase
             else
             {
                 // Linux/Mac: Generate Self-Extracting Script
-                var scriptPath = Path.Combine(_env.ContentRootPath, "Storage", "AgentTemplate", "install_template.sh");
+                var scriptPath = Path.Combine(basePath, "AgentTemplate", "install_template.sh");
                 if (!System.IO.File.Exists(scriptPath)) return StatusCode(500, "Installer Template not found.");
 
                 var scriptContent = await System.IO.File.ReadAllTextAsync(scriptPath);

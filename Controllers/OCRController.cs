@@ -9,10 +9,14 @@ namespace watch_sec_backend.Controllers;
 public class OCRController : ControllerBase
 {
     private readonly IMongoClient _mongo;
+    private readonly IConfiguration _config;
+    private readonly IWebHostEnvironment _env;
 
-    public OCRController(IMongoClient mongo)
+    public OCRController(IMongoClient mongo, IConfiguration config, IWebHostEnvironment env)
     {
         _mongo = mongo;
+        _config = config;
+        _env = env;
     }
 
     [HttpGet]
@@ -43,7 +47,10 @@ public class OCRController : ControllerBase
 
         // 1. Find Screenshot File
         // Search in all date folders for this agent (simplified)
-        var agentDir = Path.Combine(Directory.GetCurrentDirectory(), "Storage", "Screenshots", agentId);
+        var basePath = _config["StoragePath"] ?? "Storage";
+        if (!Path.IsPathRooted(basePath)) basePath = Path.Combine(_env.ContentRootPath, basePath);
+        
+        var agentDir = Path.Combine(basePath, "Screenshots", agentId);
         if (!Directory.Exists(agentDir)) return NotFound("Agent storage not found");
 
         string? imagePath = null;
